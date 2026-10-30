@@ -1,40 +1,38 @@
 # NPatch Remote API
 
-[English](README_EN.md) · 简体中文
+[English](README_EN.md) • 简体中文
 
-NPatch Remote API 是给 Xposed 模块介面 使用的轻量级 Android SDK。它让模块 App 在本地修补模式下安全连接 NPatch Manager，读写 NPatch Remote Store 中的 Preferences 和 Files，数据按模块包名隔离。
+NPatch Remote API 是专为 Xposed 模块设置界面打造的轻量级 Android SDK。它让模块 App 在免 Root 本地修补模式下安全连接 NPatch Manager，读写按模块包名严格隔离的远程 Preferences 与 Files。
 
-## 功能特性
+---
 
-- 模块 App 通过经过身份验证的 ContentProvider 取得标准 libxposed API 102 的 `IXposedService`。
-- Manager 按模块包名隔离 Preferences 与 Files，并把服务绑定到 Binder 调用 UID。
-- 被注入的目标进程继续使用 libxposed 提供的只读 Remote API；本 SDK 不暴露目标进程侧的私有 AIDL。
-- 支持带超时的同步连接、`connectAsync`、带 Manager 最低版本保护的 `connectChecked`、连线状态诊断 `probe()` 以及自定义 Manager authority。
+## 为什么需要 NPatch Remote API？
 
-## 与 libxposed 的关系
+在 NPatch 的本地免 Root 修补模式下，模块设置应用与 Manager 分属独立的 Android 沙盒，缺乏系统级守护进程分发 `XposedService`。
 
-NPatch Remote API 不是另一套 Xposed API，也不取代 libxposed。
+NPatch Remote API 内部通过经过身份校验的 ContentProvider 提供连接通道，让模块设置 App 能够按需取得标准 LibXposed API 102 的 `IXposedService` 合约——无需 Root 权限，也无需学习私有 IPC 通信。
 
-`XposedInterface` 和 `XposedService` 属于不同进程、不同生命周期和不同业务。NPatch Remote API 不参与注入目标进程，也不提供 `XposedInterface`；它只为模块本体/设置 App 在 NPatch Local 模式下补充一个取得标准 `XposedService` 的入口。
+### 核心特性
 
-| 通道 | 所在进程 | 用途 | 获取方式 |
-| --- | --- | --- | --- |
-| `XposedInterface` | 被注入的目标 App | 模块入口、Hook、目标进程生命周期 | `XposedModule.attachFramework(...)` 等 libxposed 模块生命周期回调 |
-| `XposedService` | 模块本体或设置 App | 作用域、Remote Preferences、Remote Files、热重载 | 模块注册 `<模块包名>.XposedService`，由 `XposedServiceHelper.registerListener(...)` 接收 Binder |
-| `NPatchRemoteClient` | 模块设置 App | NPatch Local 模式的备用/显式连接 | 经过校验的 NPatch Manager ContentProvider，返回同一份 API 102 `IXposedService` 合约 |
+- **标准 LibXposed 合约**：无缝支持远程偏好设置（完全兼容 `SharedPreferences`）、远程文件管理、作用域查询以及模块热重载。
+- **严格沙盒隔离**：存储数据按模块包名隔离，并严格绑定与校验 Binder 调用的 UID。
+- **即时配置同步**：内置 `ContentObserver`，在远程配置发生变动时自动刷新本地缓存。
+- **状态健康诊断 (`probe`)**：单次调用即可明确识别未安装 Manager、未启用模块、超时或权限拒绝等状态，告别繁重的 try-catch。
+- **完善生命周期管理**：支持 Binder 死亡监听（DeathRecipient），进程退出时自动释放连接与缓存，避免内存滞留。
 
-模块应优先使用 libxposed 的 `XposedServiceHelper.registerListener(...)` 标准路径。只有标准服务投递不可用、未触发或模块需要显式连接 NPatch Local Manager 时，才使用 `NPatchRemoteClient`。它不会替代 `XposedInterface`，也不会定义另一套 Hook API。
+---
 
 ## 引入 SDK
 
 ### 方式一：JitPack（推荐）
 
-在项目的 `settings.gradle.kts` 或根 `build.gradle.kts` 中添加 JitPack 仓库：
+在项目的 `settings.gradle.kts` 或根 `build.gradle.kts` 中配置 JitPack 仓库：
 
 ```kotlin
 dependencyResolutionManagement {
     repositories {
-        // ...
+        google()
+        mavenCentral()
         maven { url = uri("https://jitpack.io") }
     }
 }
@@ -51,7 +49,7 @@ dependencies {
 
 ### 方式二：手动引入 AAR
 
-从 [Releases](https://github.com/7723mod/NPatch-Remote-API/releases) 下载 AAR，复制到模块 App 的 `libs/` 目录，然后添加依赖：
+从 [Releases](https://github.com/7723mod/NPatch-Remote-API/releases) 下载 `npatch-remote-api-v1.0.1-release.aar`，放入模块项目的 `libs/` 目录，并添加依赖：
 
 ```kotlin
 dependencies {
@@ -60,88 +58,105 @@ dependencies {
 }
 ```
 
-SDK 最低支持 Android 9（API 28）或更高版本。独立构建本仓库需要 JDK 21、Android SDK 37 和自带的 Gradle Wrapper。
+> **环境要求**：Android 9.0+（API 28+），JDK 21。
 
-## 快速开始
+---
 
-连接可能需要启动 NPatch Manager 进程。请在工作线程调用同步 API，或在 UI 中使用异步 API；不要在主线程上阻塞等待连接。
+## 快速上手
+
+### 1. 基础连接与偏好设置读写
+
+建立连接可能会拉起 NPatch Manager 进程，请在工作线程调用同步 API，或在 UI 线程直接使用异步 API：
 
 ```java
-NPatchRemoteClient.connectAsync(getApplicationContext())
-        .thenAccept(client -> {
-            SharedPreferences preferences =
-                    client.getRemotePreferences("settings");
-            preferences.edit().putBoolean("enabled", true).apply();
-        })
-        .exceptionally(error -> {
-            Log.e("Module", "NPatch Remote unavailable", error);
-            return null;
-        });
+// 异步连接（主线程安全）
+NPatchRemoteClient.connectAsync(context)
+    .thenAccept(client -> {
+        SharedPreferences prefs = client.getRemotePreferences("settings");
+        
+        // 标准 SharedPreferences 操作
+        boolean isEnabled = prefs.getBoolean("feature_x", false);
+        prefs.edit().putBoolean("feature_x", true).apply();
+    })
+    .exceptionally(error -> {
+        Log.e("Module", "连接 NPatch Manager 失败", error);
+        return null;
+    });
 ```
 
-### 连接状态诊断 (`probe`)
+### 2. 连接状态诊断 (`probe`)
 
-在展示模块配置 UI 之前，可调用 `probe()` 获取结构化的状态枚举（`RemoteStatus`），向用户给出精准的错误指引（如提醒启用模块、更新 Manager 或检查权限）：
+在打开模块设置页面前，调用 `probe()` 获取结构化状态枚举（`RemoteStatus`），向用户给出明确的操作指引：
 
 ```java
 RemoteStatus status = NPatchRemoteClient.probe(context);
 switch (status) {
-    case READY -> showModuleSettings();
-    case MANAGER_NOT_FOUND -> showTip("请先安装 NPatch Manager");
-    case MODULE_NOT_CONFIGURED -> showTip("请在 NPatch Manager 中勾选启用本模块并生效");
-    case CONNECTION_TIMEOUT -> showTip("连接 Manager 超时，请重试");
-    case DENIED -> showTip("NPatch 拒绝了本次访问");
-    case UNKNOWN_ERROR -> showTip("未知错误");
+    case READY -> 
+        showSettingsUI();
+    case MANAGER_NOT_FOUND -> 
+        showNotice("未检测到 NPatch Manager，请先安装。");
+    case MODULE_NOT_CONFIGURED -> 
+        showNotice("请在 NPatch Manager 中勾选启用本模块。");
+    case CONNECTION_TIMEOUT -> 
+        showNotice("连接 NPatch Manager 超时，请重试。");
+    case DENIED -> 
+        showNotice("NPatch 拒绝了本次访问。");
+    case UNKNOWN_ERROR -> 
+        showNotice("发生未知错误。");
 }
 ```
 
-### 版本保护连接 (`connectChecked`)
+### 3. 最低版本保护 (`connectChecked`)
 
-如果模块依赖特定版本以上的 Manager 能力，可使用 `connectChecked`。若 Manager 版本过低（低于 `MIN_MANAGER_VERSION`），会直接抛出 `IncompatibleManagerException` 提示升级：
+若模块依赖特定版本以上的 Manager 能力，可在建立连接时即时验证兼容性：
 
 ```java
 NPatchRemoteClient.connectCheckedAsync(context)
-        .thenAccept(client -> {
-            // 安全使用 remote API
-        })
-        .exceptionally(error -> {
-            if (error.getCause() instanceof IncompatibleManagerException ime) {
-                Log.e("Module", "Manager 过旧: " + ime.getManagerVersionCode()
-                        + "，需要 >= " + ime.getRequiredVersionCode());
-            }
-            return null;
-        });
+    .thenAccept(client -> {
+        // 安全使用 Remote API（已验证 Manager >= 1.0.7）
+    })
+    .exceptionally(error -> {
+        if (error.getCause() instanceof IncompatibleManagerException ex) {
+            Log.w("Module", "Manager 版本过低: " + ex.getManagerVersionCode()
+                    + "，需要 >= " + ex.getRequiredVersionCode());
+        }
+        return null;
+    });
 ```
 
-若自行编译的 Manager 使用了自定义 application ID，可同时传入模块包名与对应的 authority：
+### 4. 自定义 Manager Authority
+
+如果自行编译的 Manager 修改了 Application ID 或包名，可在连接时显式传入对应 Authority：
 
 ```java
 NPatchRemoteClient client = NPatchRemoteClient.connect(
-        context,
-        context.getPackageName(),
-        "your.manager.application.id.remote"
+    context,
+    context.getPackageName(),
+    "your.custom.manager.package.remote"
 );
 ```
 
-完整接入方式、API 行为与安全边界请参阅 NPatch 官网开发指南：
+---
 
-- [NPatch Remote API 开发指南](https://npatch.nkbe.top/guide/remote-api.html)
+## 与 LibXposed 的关系
 
-## 构建
+NPatch Remote API 是 LibXposed 在免 Root 本地修补环境下的补充，不改变 Hook 机制，也不干涉注入目标进程。
 
-```bash
-./gradlew assembleRelease
-```
+| 通道 | 所在进程 | 核心职责 | 获取途径 |
+| :--- | :--- | :--- | :--- |
+| `XposedInterface` | 被注入的目标 App | Hook 入口点、模块生命周期 | 框架注入回调（`XposedModule.attachFramework` 等） |
+| `XposedService` (标准) | 模块设置 App | 作用域、远程存储、热重载 | 系统广播分发（`XposedServiceHelper.registerListener`） |
+| `NPatchRemoteClient` | 模块设置 App | NPatch 本地模式显式直连 | 安全 ContentProvider 通道，返回 API 102 `IXposedService` |
 
-AAR 输出在 `build/outputs/aar/`。也可以运行 `publishReleasePublicationToMavenLocal` 发布到本机 Maven 仓库。
+---
 
 ## 兼容性
 
-- SDK：`1.0.1`
-- libxposed interface：`102.0.0`
-- NPatch：`1.0.7` 或更高
-- Android：API 28+（Android 9 或更高）
+- **SDK 版本**：`1.0.1`
+- **LibXposed Interface**：`102.0.0`
+- **NPatch Manager**：`v1.0.7` 或更高版本
+- **系统要求**：Android 9.0+（API 28+）
 
 ## 许可证
 
-Apache License 2.0。参见 [LICENSE](LICENSE)。
+基于 [Apache License 2.0](LICENSE) 协议开源。
