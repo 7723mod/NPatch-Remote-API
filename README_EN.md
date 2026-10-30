@@ -9,7 +9,7 @@ NPatch Remote API is a lightweight Android SDK for the Xposed module settings UI
 - A module app obtains the standard libxposed API 102 `IXposedService` through an authenticated ContentProvider.
 - Manager isolates Preferences and Files by module package and binds the service to the Binder calling UID.
 - Injected target processes keep using the read-only Remote API supplied by libxposed; this SDK does not expose the private target-side AIDL.
-- The SDK provides a time-bounded synchronous connect, `connectAsync`, provider availability checks, and support for a custom Manager authority.
+- The SDK provides time-bounded synchronous connect, `connectAsync`, version-checked connection via `connectChecked`, diagnostic probing via `probe()`, and support for a custom Manager authority.
 
 ## Relationship to libxposed
 
@@ -26,6 +26,30 @@ NPatch Remote API is not another Xposed API and does not replace libxposed.
 Modules should prefer the standard libxposed `XposedServiceHelper.registerListener(...)` path. Use `NPatchRemoteClient` only when standard service delivery is unavailable, is not triggered, or the module explicitly needs to connect to NPatch Local Manager. It does not replace `XposedInterface` or define another hooking API.
 
 ## Add the SDK
+
+### Option 1: JitPack (Recommended)
+
+Add the JitPack repository in your `settings.gradle.kts` or root `build.gradle.kts`:
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        // ...
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+```
+
+Add dependencies in your module app's `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("com.github.7723mod:NPatch-Remote-API:v1.0.1")
+    implementation("io.github.libxposed:interface:102.0.0")
+}
+```
+
+### Option 2: Manual AAR dependency
 
 Download the AAR from [Releases](https://github.com/7723mod/NPatch-Remote-API/releases), copy it into the module app's `libs/` directory, then add the dependency:
 
@@ -51,6 +75,40 @@ NPatchRemoteClient.connectAsync(getApplicationContext())
         })
         .exceptionally(error -> {
             Log.e("Module", "NPatch Remote unavailable", error);
+            return null;
+        });
+```
+
+### Connection Diagnostic Probing (`probe`)
+
+Before rendering settings, query `probe()` to receive a structured `RemoteStatus` enum and show actionable guidance:
+
+```java
+RemoteStatus status = NPatchRemoteClient.probe(context);
+switch (status) {
+    case READY -> showModuleSettings();
+    case MANAGER_NOT_FOUND -> showTip("NPatch Manager is not installed");
+    case MODULE_NOT_CONFIGURED -> showTip("Please enable this module in NPatch Manager");
+    case CONNECTION_TIMEOUT -> showTip("Connection timed out, please retry");
+    case DENIED -> showTip("NPatch denied access");
+    case UNKNOWN_ERROR -> showTip("Unknown error occurred");
+}
+```
+
+### Version Compatibility Check (`connectChecked`)
+
+Ensure the running NPatch Manager meets the SDK's minimum version requirements:
+
+```java
+NPatchRemoteClient.connectCheckedAsync(context)
+        .thenAccept(client -> {
+            // safely use remote service
+        })
+        .exceptionally(error -> {
+            if (error.getCause() instanceof IncompatibleManagerException ime) {
+                Log.e("Module", "Manager version " + ime.getManagerVersionCode()
+                        + " is too old; requires >= " + ime.getRequiredVersionCode());
+            }
             return null;
         });
 ```

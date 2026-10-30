@@ -9,7 +9,7 @@ NPatch Remote API 是给 Xposed 模块介面 使用的轻量级 Android SDK。�
 - 模块 App 通过经过身份验证的 ContentProvider 取得标准 libxposed API 102 的 `IXposedService`。
 - Manager 按模块包名隔离 Preferences 与 Files，并把服务绑定到 Binder 调用 UID。
 - 被注入的目标进程继续使用 libxposed 提供的只读 Remote API；本 SDK 不暴露目标进程侧的私有 AIDL。
-- 支持带超时的同步连接、`connectAsync`、Provider 可用性探测以及自定义 Manager authority。
+- 支持带超时的同步连接、`connectAsync`、带 Manager 最低版本保护的 `connectChecked`、连线状态诊断 `probe()` 以及自定义 Manager authority。
 
 ## 与 libxposed 的关系
 
@@ -26,6 +26,30 @@ NPatch Remote API 不是另一套 Xposed API，也不取代 libxposed。
 模块应优先使用 libxposed 的 `XposedServiceHelper.registerListener(...)` 标准路径。只有标准服务投递不可用、未触发或模块需要显式连接 NPatch Local Manager 时，才使用 `NPatchRemoteClient`。它不会替代 `XposedInterface`，也不会定义另一套 Hook API。
 
 ## 引入 SDK
+
+### 方式一：JitPack（推荐）
+
+在项目的 `settings.gradle.kts` 或根 `build.gradle.kts` 中添加 JitPack 仓库：
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        // ...
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+```
+
+在模块 App 的 `build.gradle.kts` 中添加依赖：
+
+```kotlin
+dependencies {
+    implementation("com.github.7723mod:NPatch-Remote-API:v1.0.1")
+    implementation("io.github.libxposed:interface:102.0.0")
+}
+```
+
+### 方式二：手动引入 AAR
 
 从 [Releases](https://github.com/7723mod/NPatch-Remote-API/releases) 下载 AAR，复制到模块 App 的 `libs/` 目录，然后添加依赖：
 
@@ -51,6 +75,40 @@ NPatchRemoteClient.connectAsync(getApplicationContext())
         })
         .exceptionally(error -> {
             Log.e("Module", "NPatch Remote unavailable", error);
+            return null;
+        });
+```
+
+### 连接状态诊断 (`probe`)
+
+在展示模块配置 UI 之前，可调用 `probe()` 获取结构化的状态枚举（`RemoteStatus`），向用户给出精准的错误指引（如提醒启用模块、更新 Manager 或检查权限）：
+
+```java
+RemoteStatus status = NPatchRemoteClient.probe(context);
+switch (status) {
+    case READY -> showModuleSettings();
+    case MANAGER_NOT_FOUND -> showTip("请先安装 NPatch Manager");
+    case MODULE_NOT_CONFIGURED -> showTip("请在 NPatch Manager 中勾选启用本模块并生效");
+    case CONNECTION_TIMEOUT -> showTip("连接 Manager 超时，请重试");
+    case DENIED -> showTip("NPatch 拒绝了本次访问");
+    case UNKNOWN_ERROR -> showTip("未知错误");
+}
+```
+
+### 版本保护连接 (`connectChecked`)
+
+如果模块依赖特定版本以上的 Manager 能力，可使用 `connectChecked`。若 Manager 版本过低（低于 `MIN_MANAGER_VERSION`），会直接抛出 `IncompatibleManagerException` 提示升级：
+
+```java
+NPatchRemoteClient.connectCheckedAsync(context)
+        .thenAccept(client -> {
+            // 安全使用 remote API
+        })
+        .exceptionally(error -> {
+            if (error.getCause() instanceof IncompatibleManagerException ime) {
+                Log.e("Module", "Manager 过旧: " + ime.getManagerVersionCode()
+                        + "，需要 >= " + ime.getRequiredVersionCode());
+            }
             return null;
         });
 ```
