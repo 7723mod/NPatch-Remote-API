@@ -28,6 +28,7 @@ jobs:
           path: build/outputs/aar/*.aar
       - name: Publish to GitHub Packages
         if: startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
         run: ./gradlew publishReleasePublicationToGitHubPackagesRepository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
