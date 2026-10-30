@@ -2,7 +2,10 @@ package top.nkbe.npatch.remote;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.database.ContentObserver;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
@@ -55,11 +58,24 @@ public final class NPatchRemoteClient {
                 return thread;
             });
 
+    private static final Map<String, NPatchRemoteClient> CLIENT_CACHE = new ConcurrentHashMap<>();
+
+    private final Context context;
+    private final String modulePackageName;
+    private final String authority;
     private final IXposedService service;
     private final Map<String, RemotePreferences> preferences = new ConcurrentHashMap<>();
 
-    private NPatchRemoteClient(IXposedService service) {
+    private NPatchRemoteClient(
+            Context context,
+            IXposedService service,
+            String modulePackageName,
+            String authority
+    ) {
+        this.context = context;
         this.service = service;
+        this.modulePackageName = modulePackageName;
+        this.authority = authority;
     }
 
     public static NPatchRemoteClient connect(Context context) {
@@ -75,7 +91,23 @@ public final class NPatchRemoteClient {
             String modulePackageName,
             String authority
     ) {
-        return new NPatchRemoteClient(connectService(context, modulePackageName, authority));
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(modulePackageName, "modulePackageName");
+        Objects.requireNonNull(authority, "authority");
+        String cacheKey = authority + ":" + modulePackageName;
+        NPatchRemoteClient cached = CLIENT_CACHE.get(cacheKey);
+        if (cached != null && cached.service.asBinder().isBinderAlive()) {
+            return cached;
+        }
+        Context appContext = context.getApplicationContext() != null ? context.getApplicationContext() : context;
+        IXposedService service = connectService(appContext, modulePackageName, authority);
+        NPatchRemoteClient client = new NPatchRemoteClient(appContext, service, modulePackageName, authority);
+        try {
+            service.asBinder().linkToDeath(() -> CLIENT_CACHE.remove(cacheKey, client), 0);
+        } catch (RemoteException ignored) {
+        }
+        CLIENT_CACHE.put(cacheKey, client);
+        return client;
     }
 
     public static CompletableFuture<NPatchRemoteClient> connectAsync(Context context) {
@@ -133,13 +165,17 @@ public final class NPatchRemoteClient {
     }
 
     public SharedPreferences getRemotePreferences(String group) {
-        return preferences.computeIfAbsent(group, key -> new RemotePreferences(service, key));
+        return preferences.computeIfAbsent(
+                group,
+                key -> new RemotePreferences(context, service, modulePackageName, authority, key)
+        );
     }
 
     public void deleteRemotePreferences(String group) throws RemoteException {
         service.deleteRemotePreferences(group);
         RemotePreferences cached = preferences.remove(group);
         if (cached != null) {
+            cached.close();
             cached.replaceWithEmpty();
         }
     }
@@ -229,14 +265,24 @@ public final class NPatchRemoteClient {
                     return thread;
                 });
 
+        private final Context context;
         private final IXposedService service;
         private final String group;
+        private final Uri prefUri;
+        private final ContentObserver observer;
         private final Set<OnSharedPreferenceChangeListener> listeners =
                 Collections.newSetFromMap(new ConcurrentHashMap<>());
         private volatile Map<String, Object> values;
 
         @SuppressWarnings("unchecked")
-        RemotePreferences(IXposedService service, String group) {
+        RemotePreferences(
+                Context context,
+                IXposedService service,
+                String modulePackageName,
+                String authority,
+                String group
+        ) {
+            this.context = context;
             this.service = service;
             this.group = group;
             try {
@@ -250,6 +296,68 @@ public final class NPatchRemoteClient {
             } catch (RemoteException exception) {
                 throw new IllegalStateException("Cannot read NPatch remote preferences", exception);
             }
+
+            if (context != null && modulePackageName != null && authority != null) {
+                this.prefUri = Uri.parse("content://" + authority + "/pref/" + modulePackageName + "/" + group);
+                this.observer = new ContentObserver(new Handler(Looper.getMainLooper())) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        onChange(selfChange, null);
+                    }
+
+                    @Override
+                    public void onChange(boolean selfChange, Uri uri) {
+                        reloadFromRemoteAsync();
+                    }
+                };
+                try {
+                    context.getContentResolver().registerContentObserver(prefUri, false, observer);
+                } catch (Throwable ignored) {
+                }
+            } else {
+                this.prefUri = null;
+                this.observer = null;
+            }
+        }
+
+        void close() {
+            if (context != null && observer != null) {
+                try {
+                    context.getContentResolver().unregisterContentObserver(observer);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        @SuppressWarnings("unchecked")
+        private void reloadFromRemoteAsync() {
+            EXECUTOR.execute(() -> {
+                try {
+                    Bundle result = service.requestRemotePreferences(group);
+                    Serializable map = result == null ? null : result.getSerializable("map");
+                    Map<String, Object> newValues = (map instanceof Map<?, ?>)
+                            ? immutableCopy((Map<String, Object>) map)
+                            : Collections.emptyMap();
+
+                    Set<String> changed = new HashSet<>();
+                    synchronized (this) {
+                        Map<String, Object> oldValues = values;
+                        for (Map.Entry<String, Object> entry : newValues.entrySet()) {
+                            if (!Objects.equals(oldValues.get(entry.getKey()), entry.getValue())) {
+                                changed.add(entry.getKey());
+                            }
+                        }
+                        for (String oldKey : oldValues.keySet()) {
+                            if (!newValues.containsKey(oldKey)) {
+                                changed.add(oldKey);
+                            }
+                        }
+                        values = newValues;
+                    }
+                    notifyListeners(changed);
+                } catch (RemoteException ignored) {
+                }
+            });
         }
 
         @Override
