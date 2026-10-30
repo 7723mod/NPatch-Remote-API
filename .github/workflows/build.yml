@@ -22,6 +22,11 @@ jobs:
           cache: gradle
       - run: chmod +x gradlew
       - run: ./gradlew assembleRelease
+      - name: Rename release AAR with version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${{ github.ref_name }}"
+          mv build/outputs/aar/NPatch-Remote-API-release.aar "build/outputs/aar/npatch-remote-api-${TAG}-release.aar"
       - uses: actions/upload-artifact@v4
         with:
           name: npatch-remote-api
@@ -37,4 +42,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/outputs/aar/*.aar
+          files: build/outputs/aar/npatch-remote-api-*-release.aar
