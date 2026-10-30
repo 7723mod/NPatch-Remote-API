@@ -51,6 +51,12 @@ public final class NPatchRemoteClient {
     private static final String KEY_MODULE_PACKAGE = "modulePackageName";
     private static final String KEY_BINDER = "binder";
     private static final long CONNECT_TIMEOUT_SECONDS = 3;
+
+    /**
+     * Minimum NPatch Manager version code required by this SDK version.
+     * Corresponds to NPatch v1.0.7 which introduced the Remote API provider.
+     */
+    public static final long MIN_MANAGER_VERSION = 10700;
     private static final ExecutorService CONNECTION_EXECUTOR =
             Executors.newCachedThreadPool(runnable -> {
                 Thread thread = new Thread(runnable, "NPatch-RemoteConnect");
@@ -128,6 +134,51 @@ public final class NPatchRemoteClient {
     ) {
         return CompletableFuture.supplyAsync(
                 () -> connect(context, modulePackageName, authority),
+                CONNECTION_EXECUTOR
+        );
+    }
+
+    /**
+     * Connects to the NPatch Manager and verifies protocol compatibility.
+     *
+     * <p>After establishing the connection, this method calls
+     * {@code getFrameworkVersionCode()} on the remote service and throws
+     * {@link IncompatibleManagerException} if the Manager is older than
+     * {@link #MIN_MANAGER_VERSION}.</p>
+     *
+     * @throws IncompatibleManagerException if the Manager version is too old
+     * @throws IllegalStateException if the connection fails
+     * @throws SecurityException if the module is rejected
+     */
+    public static NPatchRemoteClient connectChecked(Context context) {
+        return connectChecked(context, context.getPackageName(), DEFAULT_AUTHORITY);
+    }
+
+    /** @see #connectChecked(Context) */
+    public static NPatchRemoteClient connectChecked(
+            Context context, String modulePackageName, String authority) {
+        NPatchRemoteClient client = connect(context, modulePackageName, authority);
+        try {
+            long managerVersion = client.service.getFrameworkVersionCode();
+            if (managerVersion < MIN_MANAGER_VERSION) {
+                throw new IncompatibleManagerException(managerVersion, MIN_MANAGER_VERSION);
+            }
+        } catch (RemoteException e) {
+            throw new IncompatibleManagerException(0, MIN_MANAGER_VERSION);
+        }
+        return client;
+    }
+
+    /** Async variant of {@link #connectChecked(Context)}. */
+    public static CompletableFuture<NPatchRemoteClient> connectCheckedAsync(Context context) {
+        return connectCheckedAsync(context, context.getPackageName(), DEFAULT_AUTHORITY);
+    }
+
+    /** @see #connectCheckedAsync(Context) */
+    public static CompletableFuture<NPatchRemoteClient> connectCheckedAsync(
+            Context context, String modulePackageName, String authority) {
+        return CompletableFuture.supplyAsync(
+                () -> connectChecked(context, modulePackageName, authority),
                 CONNECTION_EXECUTOR
         );
     }
