@@ -334,6 +334,7 @@ public final class NPatchRemoteClient {
         }
         Bundle extras = new Bundle();
         extras.putString(KEY_MODULE_PACKAGE, modulePackageName);
+        extras.putBinder("clientToken", new android.os.Binder());
         Future<Bundle> call = CONNECTION_EXECUTOR.submit(
                 () -> context.getContentResolver().call(
                         Uri.parse("content://" + authority),
