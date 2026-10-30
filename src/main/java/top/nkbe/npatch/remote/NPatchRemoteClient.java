@@ -164,6 +164,65 @@ public final class NPatchRemoteClient {
         return context.getPackageManager().resolveContentProvider(authority, 0) != null;
     }
 
+    /**
+     * Diagnoses the connection status without throwing exceptions.
+     *
+     * <p>Returns a {@link RemoteStatus} that explains <em>why</em> the remote service is
+     * or is not reachable. Use this to show actionable guidance in the module settings UI
+     * instead of catching opaque exceptions from {@link #connect}.</p>
+     *
+     * <p>This method performs IPC and must not be called on the main thread.</p>
+     *
+     * @param context the application context
+     * @return a {@link RemoteStatus} describing the current connection state
+     */
+    public static RemoteStatus probe(Context context) {
+        return probe(context, context.getPackageName(), DEFAULT_AUTHORITY);
+    }
+
+    /**
+     * Diagnoses the connection status for a specific module package and authority.
+     *
+     * @param context           the application context
+     * @param modulePackageName the module package to probe
+     * @param authority         the Manager ContentProvider authority
+     * @return a {@link RemoteStatus} describing the current connection state
+     */
+    public static RemoteStatus probe(Context context, String modulePackageName, String authority) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(modulePackageName, "modulePackageName");
+        Objects.requireNonNull(authority, "authority");
+
+        if (context.getPackageManager().resolveContentProvider(authority, 0) == null) {
+            return RemoteStatus.MANAGER_NOT_FOUND;
+        }
+
+        try {
+            NPatchRemoteClient client = connect(context, modulePackageName, authority);
+            if (client.service.asBinder().isBinderAlive()) {
+                return RemoteStatus.READY;
+            }
+            return RemoteStatus.UNKNOWN_ERROR;
+        } catch (SecurityException e) {
+            String msg = e.getMessage();
+            if (msg != null && msg.contains("rejected")) {
+                return RemoteStatus.MODULE_NOT_CONFIGURED;
+            }
+            return RemoteStatus.DENIED;
+        } catch (IllegalStateException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof TimeoutException) {
+                return RemoteStatus.CONNECTION_TIMEOUT;
+            }
+            if (e.getMessage() != null && e.getMessage().contains("timed out")) {
+                return RemoteStatus.CONNECTION_TIMEOUT;
+            }
+            return RemoteStatus.UNKNOWN_ERROR;
+        } catch (Exception e) {
+            return RemoteStatus.UNKNOWN_ERROR;
+        }
+    }
+
     public SharedPreferences getRemotePreferences(String group) {
         return preferences.computeIfAbsent(
                 group,
